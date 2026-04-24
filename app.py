@@ -1,5 +1,3 @@
-# %%
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -62,6 +60,7 @@ def build_label_map(item_numbers, label_df=None):
 
     tmp = label_df.copy()
     tmp["Item_Number"] = pd.to_numeric(tmp["Item_Number"], errors="coerce")
+
     if tmp["Item_Number"].isna().any():
         raise ValueError("Label mapping file has invalid Item_Number values.")
 
@@ -115,6 +114,7 @@ def build_order_based_liking_map(unique_values, mapping_df):
 
     if tmp["Order"].isna().any():
         raise ValueError("Each appeal value must have an order assigned.")
+
     if not np.all(tmp["Order"].astype(float).apply(float.is_integer)):
         raise ValueError("Order values must be whole numbers.")
 
@@ -125,11 +125,13 @@ def build_order_based_liking_map(unique_values, mapping_df):
 
     expected_orders = list(range(1, len(unique_values) + 1))
     observed_orders = sorted(tmp["Order"].tolist())
+
     if observed_orders != expected_orders:
         raise ValueError(f"Order values must be exactly {expected_orders}, got {observed_orders}.")
 
     mapped_values = set(tmp["Appeal_Value"].tolist())
     expected_values = set(unique_values)
+
     if mapped_values != expected_values:
         missing = expected_values - mapped_values
         extra = mapped_values - expected_values
@@ -148,7 +150,13 @@ def build_order_based_liking_map(unique_values, mapping_df):
         for _, row in tmp.iterrows()
     }
 
-    display_df = tmp[["Appeal_Value", "Order", "Score"]].sort_values("Order").reset_index(drop=True)
+    display_df = (
+        tmp[["Appeal_Value", "Order", "Score"]]
+        .sort_values("Order")
+        .reset_index(drop=True)
+        .copy()
+    )
+
     return liking_map, display_df
 
 # =========================================================
@@ -182,7 +190,7 @@ def validate_and_transform_main_data(raw_data, liking_map):
     invalid_rows = []
 
     for idx, row in df.iterrows():
-        row_num = idx + 2  # spreadsheet-like row number
+        row_num = idx + 2
 
         for _, col in appeal_cols.items():
             raw_val = row[col]
@@ -248,8 +256,8 @@ def validate_and_transform_main_data(raw_data, liking_map):
                 rank_df.at[idx, int(val)] = rank_pos
 
     return {
-        "appeal_scores": liking_score_df,
-        "ranks": rank_df,
+        "appeal_scores": liking_score_df.copy(),
+        "ranks": rank_df.copy(),
         "item_numbers": item_numbers,
         "appeal_cols": appeal_cols,
         "rank_cols": rank_cols
@@ -278,12 +286,12 @@ def compare_two_items(rank_i, like_i, rank_j, like_j):
 
 def compute_pairwise_counts_hybrid(appeal_scores, rank_df, item_numbers):
     wins = pd.DataFrame(
-        np.zeros((len(item_numbers), len(item_numbers))),
+        np.zeros((len(item_numbers), len(item_numbers)), dtype=float),
         index=item_numbers,
         columns=item_numbers
     )
     comparisons = pd.DataFrame(
-        np.zeros((len(item_numbers), len(item_numbers))),
+        np.zeros((len(item_numbers), len(item_numbers)), dtype=float),
         index=item_numbers,
         columns=item_numbers
     )
@@ -304,25 +312,33 @@ def compute_pairwise_counts_hybrid(appeal_scores, rank_df, item_numbers):
                 if pd.isna(result):
                     continue
 
-                comparisons.loc[i, j] += 1
-                wins.loc[i, j] += result
+                comparisons.loc[i, j] = comparisons.loc[i, j] + 1.0
+                wins.loc[i, j] = wins.loc[i, j] + result
 
-    return wins, comparisons
+    return wins.copy(), comparisons.copy()
 
 # =========================================================
 # Thurstone Case V
 # =========================================================
 def compute_preference_matrix(wins, comparisons):
     with np.errstate(divide="ignore", invalid="ignore"):
-        p_matrix = wins / comparisons
-    np.fill_diagonal(p_matrix.values, np.nan)
+        p_matrix = wins.divide(comparisons)
+
+    p_matrix = p_matrix.copy()
+
+    for i in range(len(p_matrix)):
+        p_matrix.iat[i, i] = np.nan
+
     return p_matrix
 
 def compute_thurstone_case_v_scores(p_matrix, clip_eps=1e-4):
     z_matrix = p_matrix.copy()
-    z_matrix = z_matrix.applymap(
-        lambda x: norm.ppf(np.clip(x, clip_eps, 1 - clip_eps)) if pd.notna(x) else np.nan
-    )
+
+    for row_idx in range(z_matrix.shape[0]):
+        for col_idx in range(z_matrix.shape[1]):
+            val = z_matrix.iat[row_idx, col_idx]
+            if pd.notna(val):
+                z_matrix.iat[row_idx, col_idx] = norm.ppf(np.clip(val, clip_eps, 1 - clip_eps))
 
     scale_values = z_matrix.mean(axis=1, skipna=True)
     scale_values = scale_values - scale_values.mean()
@@ -332,7 +348,7 @@ def compute_thurstone_case_v_scores(p_matrix, clip_eps=1e-4):
         "Thurstone_Score": scale_values.values
     }).sort_values("Thurstone_Score", ascending=False).reset_index(drop=True)
 
-    return z_matrix, results
+    return z_matrix.copy(), results.copy()
 
 # =========================================================
 # Labeling helpers
@@ -346,7 +362,7 @@ def apply_labels_to_square_matrix(df, label_map):
 def apply_labels_to_results(results, label_map):
     out = results.copy()
     out["Item_Label"] = out["Item_Number"].map(label_map)
-    return out[["Item_Number", "Item_Label", "Thurstone_Score"]]
+    return out[["Item_Number", "Item_Label", "Thurstone_Score"]].copy()
 
 def build_rank_assignment_table(rank_df, label_map):
     out = rank_df.copy()
@@ -364,10 +380,10 @@ def build_appeal_score_table(appeal_scores, label_map):
 # Plot
 # =========================================================
 def plot_thurstone_vertical(results_labeled):
-    df = results_labeled.sort_values("Thurstone_Score", ascending=False).reset_index(drop=True)
+    df = results_labeled.sort_values("Thurstone_Score", ascending=False).reset_index(drop=True).copy()
 
-    y = df["Thurstone_Score"].values
-    labels = df["Item_Label"].astype(str).values
+    y = df["Thurstone_Score"].to_numpy(copy=True)
+    labels = df["Item_Label"].astype(str).to_list()
 
     fig, ax = plt.subplots(figsize=(5, 8))
     ax.scatter([0] * len(y), y, s=80)
@@ -385,8 +401,8 @@ def plot_thurstone_vertical(results_labeled):
     ax.spines["bottom"].set_visible(False)
 
     if len(y) > 0:
-        ax.text(0, max(y) + 0.08, "More Preferred", ha="center", fontsize=10)
-        ax.text(0, min(y) - 0.08, "Less Preferred", ha="center", fontsize=10)
+        ax.text(0, float(np.max(y)) + 0.08, "More Preferred", ha="center", fontsize=10)
+        ax.text(0, float(np.min(y)) - 0.08, "Less Preferred", ha="center", fontsize=10)
 
     plt.tight_layout()
     return fig
@@ -429,20 +445,20 @@ def build_excel_output(
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        raw_data.to_excel(writer, sheet_name="Raw Data", index=False)
-        appeal_mapping_df.to_excel(writer, sheet_name="Appeal Mapping", index=False)
+        raw_data.copy().to_excel(writer, sheet_name="Raw Data", index=False)
+        appeal_mapping_df.copy().to_excel(writer, sheet_name="Appeal Mapping", index=False)
 
         if label_mapping_df is not None:
-            label_mapping_df.to_excel(writer, sheet_name="Label Mapping", index=False)
+            label_mapping_df.copy().to_excel(writer, sheet_name="Label Mapping", index=False)
 
-        appeal_scores_labeled.to_excel(writer, sheet_name="Appeal Scores")
-        rank_assignments_labeled.to_excel(writer, sheet_name="Assigned Ranks")
-        wins_labeled.to_excel(writer, sheet_name="Pairwise Wins")
-        comparisons_labeled.to_excel(writer, sheet_name="Comparisons")
-        p_matrix_labeled.to_excel(writer, sheet_name="Preference Matrix")
-        z_matrix_labeled.to_excel(writer, sheet_name="Z Matrix")
-        results_labeled.to_excel(writer, sheet_name="Scale Scores", index=False)
-        method_notes.to_excel(writer, sheet_name="Method Notes", index=False)
+        appeal_scores_labeled.copy().to_excel(writer, sheet_name="Appeal Scores")
+        rank_assignments_labeled.copy().to_excel(writer, sheet_name="Assigned Ranks")
+        wins_labeled.copy().to_excel(writer, sheet_name="Pairwise Wins")
+        comparisons_labeled.copy().to_excel(writer, sheet_name="Comparisons")
+        p_matrix_labeled.copy().to_excel(writer, sheet_name="Preference Matrix")
+        z_matrix_labeled.copy().to_excel(writer, sheet_name="Z Matrix")
+        results_labeled.copy().to_excel(writer, sheet_name="Scale Scores", index=False)
+        method_notes.copy().to_excel(writer, sheet_name="Method Notes", index=False)
 
         sheet = writer.sheets["Scale Scores"]
         imgdata = io.BytesIO()
@@ -619,8 +635,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# %%
-
-
-
